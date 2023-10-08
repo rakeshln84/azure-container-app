@@ -2,10 +2,11 @@ param containerAppsEnvName string
 param containerRegistryName string
 param location string
 param logAnalyticsWorkspaceName string
-param serviceBusName string
 param applicationInsightsName string = ''
+param storageAccountName string
+param blobContainerName string
+param managedIdentity object
 param daprEnabled bool = false
-param managedIdentityClientId string
 
 // Container apps host (including container registry)
 module containerApps '../core/host/container-apps.bicep' = {
@@ -26,33 +27,36 @@ resource caEnvironment 'Microsoft.App/managedEnvironments@2022-06-01-preview' ex
   name: containerAppsEnvName
 }
 
-resource daprComponentPubsub 'Microsoft.App/managedEnvironments/daprComponents@2022-06-01-preview' = {
+// Dapr state store component 
+resource daprComponent 'Microsoft.App/managedEnvironments/daprComponents@2022-03-01' = {
+  name: 'statestore'
   parent: caEnvironment
-  name: 'orderpubsub'
   properties: {
-    componentType: 'pubsub.azure.servicebus'
+    componentType: 'state.azure.blobstorage'
     version: 'v1'
+    ignoreErrors: false
+    initTimeout: '5s'
     metadata: [
       {
+        name: 'accountName'
+        value: storageAccountName
+      }
+      {
+        name: 'containerName'
+        value: blobContainerName
+      }
+      {
         name: 'azureClientId'
-        value: managedIdentityClientId // See https://docs.dapr.io/developing-applications/integrations/azure/authenticating-azure/#credentials-metadata-fields for MSI
-      }
-      {
-        name: 'namespaceName' // See https://docs.dapr.io/reference/components-reference/supported-pubsub/setup-azure-servicebus-topics/#spec-metadata-fields
-        value: '${serviceBusName}.servicebus.windows.net' // the .servicebus.windows.net suffix is required as per dapr docs
-      }
-      {
-        name: 'consumerID'
-        value: 'orders' // Set to the same value of the subscription seen in ./servicebus.bicep
+        value: managedIdentity.properties.clientId
       }
     ]
-    scopes: []
+    scopes: [
+      'backendapp'
+    ]
   }
-  dependsOn: [
-    containerApps
-  ]
 }
 
 output environmentName string = containerApps.outputs.environmentName
+output environmentId string = containerApps.outputs.environmentId
 output registryLoginServer string = containerApps.outputs.registryLoginServer
 output registryName string = containerApps.outputs.registryName

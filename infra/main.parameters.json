@@ -3,22 +3,19 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "environmentName": {
-      "value": "${AZURE_ENV_NAME}"
+      "value": "dev"
     },
     "location": {
-      "value": "${AZURE_LOCATION}"
+      "value": "australiaeast"
     },
-    "publisherImageName": {
-      "value": "${SERVICE_PUBLISHER_IMAGE_NAME}"
+    "containerAppsEnvironmentName": {
+      "value": "containerapp-demo"
     },
-    "subscriberImageName": {
-      "value": "${SERVICE_SUBSCRIBER_IMAGE_NAME}"
+    "containerRegistryName": {
+      "value": "myregistry081020"
     },
-    "publisherAppExists": {
-      "value": "${SERVICE_CHECKOUT_RESOURCE_EXISTS}"
-    },
-    "subscriberAppExists": {
-      "value": "${SERVICE_ORDERS_RESOURCE_EXISTS}"
+    "storageAccountName": {
+      "value": "containerappdemo081020"
     }
   }
 }

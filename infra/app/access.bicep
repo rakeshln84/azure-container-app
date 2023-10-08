@@ -1,48 +1,28 @@
 param managedIdentityName string
-param serviceBusName string
-param location string
+param storageAccountName string
 
-// See https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#azure-service-bus-data-sender
-var roleIdS = '69a216fc-b8fb-44d8-bc22-1f3c2cd27a39' // Azure Service Bus Data Sender
-// See https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#azure-service-bus-data-receiver
-var roleIdR = '4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0' // Azure Service Bus Data Receiver
+resource storageAccount 'Microsoft.Storage/storageAccounts@2021-06-01' existing = {
+  name: storageAccountName
+}
 
-// user assigned managed identity to use throughout
-resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2022-01-31-preview' existing = {
   name: managedIdentityName
-  location: location
 }
 
-resource serviceBus 'Microsoft.ServiceBus/namespaces@2021-11-01' existing = {
-  name: serviceBusName
+// Grant permissions for the container app to write to Azure Blob via Managed Identity 
+@description('This is the built-in Storage Blob Data Contributor role. See https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#storage-blob-data-contributor')
+resource contributorRoleDefinition 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  scope: storageAccount
+  name: 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 }
 
-// Grant permissions to the managedIdentity to specific role to servicebus
-resource roleAssignmentReceiver 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
-  name: guid(serviceBus.id, roleIdR, managedIdentityName)
-  scope: serviceBus
+resource roleAssignment 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
+  name: guid(resourceGroup().id, contributorRoleDefinition.id)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIdR)
+    roleDefinitionId: contributorRoleDefinition.id
     principalId: managedIdentity.properties.principalId
-    principalType: 'ServicePrincipal' // managed identity is a form of service principal
+    principalType: 'ServicePrincipal'
   }
-  dependsOn: [
-    serviceBus
-  ]
-}
-
-// Grant permissions to the managedIdentity to specific role to servicebus
-resource roleAssignmentSender 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
-  name: guid(serviceBus.id, roleIdS, managedIdentityName)
-  scope: serviceBus
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleIdS)
-    principalId: managedIdentity.properties.principalId
-    principalType: 'ServicePrincipal' // managed identity is a form of service principal
-  }
-  dependsOn: [
-    serviceBus
-  ]
 }
 
 output managedIdentityPrincipalId string = managedIdentity.properties.principalId

@@ -1,5 +1,3 @@
-targetScope = 'subscription'
-
 @minLength(1)
 @maxLength(64)
 @description('Name of the the environment which is used to generate a short unique hash used in all resources.')
@@ -9,47 +7,24 @@ param environmentName string
 @description('Primary location for all resources')
 param location string
 
-// App based params
-// Publisher
-param publisherContainerAppName string = ''
-param publisherServiceName string = 'checkout'
-param publisherAppExists bool = false
-
-//Subsciber
-param subscriberContainerAppName string = ''
-param subscriberServiceName string = 'orders'
-param subscriberAppExists bool = false
-
 param applicationInsightsDashboardName string = ''
 param applicationInsightsName string = ''
 param logAnalyticsName string = ''
 
+param storageAccountName string = 'containerappdemo'
+param blobContainerName string = 'counter'
+param managedIdentityName string = 'containerapp-identity'
 
 param containerAppsEnvironmentName string = ''
 param containerRegistryName string = ''
-
-param resourceGroupName string = ''
-// Optional parameters to override the default azd resource naming conventions. Update the main.parameters.json file to provide values. e.g.,:
-// "resourceGroupName": {
-//      "value": "myGroupName"
-// }
 
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
 
-
-// Organize resources in a resource group
-resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
-  name: !empty(resourceGroupName) ? resourceGroupName : '${abbrs.resourcesResourceGroups}${environmentName}'
-  location: location
-  tags: tags
-}
-
 // Monitor application with Azure Monitor
 module monitoring './core/monitor/monitoring.bicep' = {
   name: 'monitoring'
-  scope: rg
   params: {
     location: location
     tags: tags
@@ -59,86 +34,204 @@ module monitoring './core/monitor/monitoring.bicep' = {
   }
 }
 
-module serviceBusResources './app/servicebus.bicep' = {
-  name: 'sb-resources'
-  scope: rg
-  params: {
-    location: location
-    tags: tags
-    resourceToken: resourceToken
-    skuName: 'Standard'
+// Storage Account to act as state store 
+resource storageAccount 'Microsoft.Storage/storageAccounts@2021-06-01' = {
+  name: storageAccountName
+  location: location
+  kind: 'StorageV2'
+  sku: {
+    name: 'Standard_LRS'
   }
 }
 
-module serviceBusAccess './app/access.bicep' = {
-  name: 'sb-access'
-  scope: rg
-  params: {
-    location: location
-    serviceBusName: serviceBusResources.outputs.serviceBusName
-    managedIdentityName: '${abbrs.managedIdentityUserAssignedIdentities}${resourceToken}'
-  }
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2021-06-01' = {
+  parent: storageAccount
+  name: 'default'
 }
 
+resource blobContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2021-06-01' = {
+  parent: blobService
+  name: blobContainerName
+}
+
+resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2022-01-31-preview' = {
+  name: managedIdentityName
+  location: location
+}
 
 // Shared App Env with Dapr configuration for db
 module appEnv './app/app-env.bicep' = {
   name: 'app-env'
-  scope: rg
   params: {
     containerAppsEnvName: !empty(containerAppsEnvironmentName) ? containerAppsEnvironmentName : '${abbrs.appManagedEnvironments}${resourceToken}'
     containerRegistryName: !empty(containerRegistryName) ? containerRegistryName : '${abbrs.containerRegistryRegistries}${resourceToken}'
     location: location
     logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
-    serviceBusName: serviceBusResources.outputs.serviceBusName
     applicationInsightsName: monitoring.outputs.applicationInsightsName
+    managedIdentity: managedIdentity
+    storageAccountName: storageAccountName
+    blobContainerName: blobContainerName
     daprEnabled: true
-    managedIdentityClientId: serviceBusAccess.outputs.managedIdentityClientlId
   }
 }
 
-module publisherApp './app/publisher.bicep' = {
-  name: 'api-resources'
-  scope: rg
+@description('This is the built-in Storage Blob Data Contributor role. See https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#storage-blob-data-contributor')
+resource contributorRoleDefinition 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  scope: storageAccount
+  name: 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+}
+
+resource roleAssignment 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
+  name: guid(resourceGroup().id, contributorRoleDefinition.id)
+  properties: {
+    roleDefinitionId: contributorRoleDefinition.id
+    principalId: managedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+module backendapp 'core/host/container-app-upsert.bicep' = {
+  name: 'backendapp-container-app-module'
   params: {
-    name: !empty(publisherContainerAppName) ? publisherContainerAppName : '${abbrs.appContainerApps}${publisherServiceName}-${resourceToken}'
-    serviceName: publisherServiceName
-    containerRegistryName: appEnv.outputs.registryName
+    name: 'backendapp'
     location: location
-    containerAppsEnvironmentName: appEnv.outputs.environmentName
-    managedIdentityName: serviceBusAccess.outputs.managedIdentityName
-    exists: publisherAppExists
+    tags: union(tags, { 'azd-service-name': 'backendapp' })
+    containerAppsEnvironmentName: containerAppsEnvironmentName
+    containerRegistryName: containerRegistryName
+    imageName: 'myregistry081020.azurecr.io/containerappdemo-backend-app:v1'
+    // containerCpuCoreCount: '0.25'
+    targetPort: 80
+    // containerMemory: '0.5Gi'
+    daprEnabled: true
+    containerName: 'backendapp'
+    daprAppId: 'backendapp'
+    ingressEnabled: true
+    identityType: 'UserAssigned'
+    identityName: managedIdentityName
+    // exists: exists
   }
-  dependsOn: [
-    subscriberApp  // Deploy the subscriber first and then deploy the publisher
-  ]
 }
 
-module subscriberApp './app/subscriber.bicep' = {
-  name: 'web-resources'
-  scope: rg
+module frontendapp 'core/host/container-app-upsert.bicep' = {
+  name: 'frontendapp-container-app-module'
   params: {
-    name: !empty(subscriberContainerAppName) ? subscriberContainerAppName : '${abbrs.appContainerApps}${subscriberServiceName}-${resourceToken}'
+    name: 'frontendapp'
     location: location
-    containerRegistryName: appEnv.outputs.registryName
-    containerAppsEnvironmentName: appEnv.outputs.environmentName
-    serviceName: subscriberServiceName
-    managedIdentityName: serviceBusAccess.outputs.managedIdentityName
-    exists: subscriberAppExists
+    tags: union(tags, { 'azd-service-name': 'frontendapp' })
+    containerAppsEnvironmentName: containerAppsEnvironmentName
+    containerRegistryName: containerRegistryName
+    imageName: 'myregistry081020.azurecr.io/containerappdemo-frontend-app:v1'
+    // containerCpuCoreCount: '0.25'
+    targetPort: 80
+    // containerMemory: '0.5Gi'
+    daprEnabled: true
+    containerName: 'frontendapp'
+    daprAppId: 'frontendapp'
+    ingressEnabled: true
+    identityType: 'UserAssigned'
+    identityName: managedIdentityName
+    // exists: exists
   }
 }
 
+// resource backendapp 'Microsoft.App/containerApps@2022-03-01' = {
+//   name: 'backendapp'
+//   location: location
+//   identity: {
+//     type: 'UserAssigned'
+//     userAssignedIdentities: {
+//       '${managedIdentity.id}': {}
+//     }
+//   }
+//   properties: {
+//     managedEnvironmentId: appEnv.outputs.environmentId
+//     configuration: {
+//       ingress: {
+//         external: false
+//         targetPort: 80
+//       }
+//       dapr: {
+//         enabled: true
+//         appId: 'backendapp'
+//         appProtocol: 'http'
+//         appPort: 80
+//       }
+//     }
+//     template: {
+//       containers: [
+//         {
+//           image: 'myregistry081020.azurecr.io/containerappdemo-backend-app:v1'
+//           name: 'containerappdemo-backend-app'
+//           env: [
+//             {
+//               name: 'APP_PORT'
+//               value: '80'
+//             }
+//           ]
+//           resources: {
+//             cpu: json('0.5')
+//             memory: '1.0Gi'
+//           }
+//         }
+//       ]
+//       scale: {
+//         minReplicas: 1
+//         maxReplicas: 1
+//       }
+//     }
+//   }
+// }
 
-output SERVICE_PUBLISHER_NAME string = publisherApp.outputs.SERVICE_PUBLISHER_NAME
-output SERVICE_PUBLISHER_IMAGE_NAME string = publisherApp.outputs.SERVICE_PUBLISHER_IMAGE_NAME
-output SERVICE_SUBSCRIBER_NAME string = subscriberApp.outputs.SERVICE_SUBSCRIBER_NAME
-output SERVICE_SUBSCRIBER_IMAGE_NAME string = subscriberApp.outputs.SERVICE_SUBSCRIBER_IMAGE_NAME
-output SUBSCRIBER_APP_URI string = subscriberApp.outputs.SUBSCRIBER_URI
-output SERVICEBUS_ENDPOINT string = serviceBusResources.outputs.SERVICEBUS_ENDPOINT
-output SERVICEBUS_NAME string = serviceBusResources.outputs.serviceBusName
+// resource frontendapp 'Microsoft.App/containerApps@2022-03-01' = {
+//   name: 'frontendapp'
+//   location: location
+//   identity: {
+//     type: 'UserAssigned'
+//     userAssignedIdentities: {
+//       '${managedIdentity.id}': {}
+//     }
+//   }
+//   properties: {
+//     managedEnvironmentId: appEnv.outputs.environmentId
+//     configuration: {
+//       ingress: {
+//         external: false
+//         targetPort: 80
+//       }
+//       dapr: {
+//         enabled: true
+//         appId: 'frontendapp'
+//         appProtocol: 'http'
+//         appPort: 80
+//       }
+//     }
+//     template: {
+//       containers: [
+//         {
+//           image: 'myregistry081020.azurecr.io/containerappdemo-frontend-app:v1'
+//           name: 'containerappdemo-frontend-app'
+//           env: [
+//             {
+//               name: 'APP_PORT'
+//               value: '80'
+//             }
+//           ]
+//           resources: {
+//             cpu: json('0.5')
+//             memory: '1.0Gi'
+//           }
+//         }
+//       ]
+//       scale: {
+//         minReplicas: 1
+//         maxReplicas: 1
+//       }
+//     }
+//   }
+// }
+
 output APPINSIGHTS_INSTRUMENTATIONKEY string = monitoring.outputs.applicationInsightsInstrumentationKey
 output APPLICATIONINSIGHTS_NAME string = monitoring.outputs.applicationInsightsName
 output AZURE_CONTAINER_ENVIRONMENT_NAME string = appEnv.outputs.environmentName
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = appEnv.outputs.registryLoginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = appEnv.outputs.registryName
-output AZURE_MANAGED_IDENTITY_NAME string = serviceBusAccess.outputs.managedIdentityName
